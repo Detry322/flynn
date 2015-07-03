@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	. "github.com/flynn/flynn/Godeps/_workspace/src/github.com/flynn/go-check"
@@ -88,6 +89,7 @@ func (s *S) TestStreamEventsWithoutApp(c *C) {
 
 	// send fake event
 
+	// TODO(jvatic): Use a real resource
 	type FakeEvent struct {
 		Message string `json:"message"`
 	}
@@ -110,5 +112,69 @@ func (s *S) TestStreamEventsWithoutApp(c *C) {
 		c.Assert(event.Message, Equals, "payload")
 	case <-time.After(time.Second):
 		c.Fatal("Timed out waiting for event")
+	}
+}
+
+func (s *S) TestStreamAppLifeCycleEvents(c *C) {
+	release := s.createTestRelease(c, &ct.Release{})
+
+	events := make(chan *ct.Event)
+	stream, err := s.c.StreamEvents(cc.StreamEventsOptions{}, events)
+	c.Assert(err, IsNil)
+	defer stream.Close()
+
+	app := s.createTestApp(c, &ct.App{Name: "app3"})
+
+	c.Assert(s.c.SetAppRelease(app.ID, release.ID), IsNil)
+	newStrategy := "one-by-one"
+	c.Assert(s.c.UpdateApp(&ct.App{
+		ID:       app.ID,
+		Strategy: newStrategy,
+	}), IsNil)
+	newMeta := map[string]string{
+		"foo": "bar",
+	}
+	c.Assert(s.c.UpdateApp(&ct.App{
+		ID:   app.ID,
+		Meta: newMeta,
+	}), IsNil)
+
+	eventAssertions := []func(*ct.AppEvent){
+		func(e *ct.AppEvent) {
+			c.Assert(e.Type, Equals, "create")
+			c.Assert(e.App.ReleaseID, Equals, app.ReleaseID)
+			c.Assert(e.App.Strategy, Equals, app.Strategy)
+			c.Assert(e.App.Meta, DeepEquals, app.Meta)
+		},
+		func(e *ct.AppEvent) {
+			c.Assert(e.Type, Equals, "update")
+			c.Assert(e.App.ReleaseID, Equals, release.ID)
+			c.Assert(e.App.Strategy, Equals, app.Strategy)
+			c.Assert(e.App.Meta, DeepEquals, app.Meta)
+		},
+		func(e *ct.AppEvent) {
+			c.Assert(e.Type, Equals, "update")
+			c.Assert(e.App.Strategy, Equals, newStrategy)
+			c.Assert(e.App.Meta, DeepEquals, newMeta)
+		},
+	}
+
+	for i, fn := range eventAssertions {
+		select {
+		case e, ok := <-events:
+			if !ok {
+				c.Fatal("unexpected close of event stream")
+			}
+			var appEvent *ct.AppEvent
+			c.Assert(json.Unmarshal(e.Data, &appEvent), IsNil)
+			c.Assert(e.AppID, Equals, app.ID)
+			c.Assert(e.ObjectType, Equals, ct.EventTypeApp)
+			c.Assert(e.ObjectID, Equals, app.ID)
+			c.Assert(appEvent.App, NotNil)
+			c.Assert(appEvent.App.ID, Equals, app.ID)
+			fn(appEvent)
+		case <-time.After(time.Second):
+			c.Fatal(fmt.Sprintf("Timed out waiting for event %d", i))
+		}
 	}
 }

@@ -220,6 +220,7 @@ type EventSubscriber struct {
 // Notify filters the event based on it's type and objectID and then pushes
 // it to the event queue.
 func (e *EventSubscriber) Notify(event *ct.Event) {
+	fmt.Printf("Notify: %#v\n", event)
 	if len(e.objectTypes) > 0 {
 		foundType := false
 		for _, typ := range e.objectTypes {

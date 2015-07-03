@@ -43,6 +43,7 @@ func NewAppRepo(db *postgres.DB, defaultDomain string, router routerc.Client) *A
 var appNamePattern = regexp.MustCompile(`^[a-z\d]+(-[a-z\d]+)*$`)
 
 func (r *AppRepo) Add(data interface{}) error {
+	fmt.Printf("AppRepo.Add: %#v\n", data)
 	app := data.(*ct.App)
 	if app.Name == "" {
 		var nameID uint32
@@ -78,15 +79,24 @@ func (r *AppRepo) Add(data interface{}) error {
 			log.Printf("Error creating default route for %s: %s", app.Name, err)
 		}
 	}
+
+	defer r.createEvent(app.ID, ct.AppEvent{
+		Type: "create",
+	})
+
 	return nil
 }
 
 func scanApp(s postgres.Scanner) (*ct.App, error) {
 	app := &ct.App{}
 	var meta hstore.Hstore
-	err := s.Scan(&app.ID, &app.Name, &meta, &app.Strategy, &app.CreatedAt, &app.UpdatedAt)
+	var releaseID *string
+	err := s.Scan(&app.ID, &app.Name, &meta, &app.Strategy, &releaseID, &app.CreatedAt, &app.UpdatedAt)
 	if err == sql.ErrNoRows {
 		err = ErrNotFound
+	}
+	if releaseID != nil {
+		app.ReleaseID = *releaseID
 	}
 	if len(meta.Map) > 0 {
 		app.Meta = make(map[string]string, len(meta.Map))
@@ -105,7 +115,7 @@ type rowQueryer interface {
 }
 
 func selectApp(db rowQueryer, id string, update bool) (*ct.App, error) {
-	query := "SELECT app_id, name, meta, strategy, created_at, updated_at FROM apps WHERE deleted_at IS NULL AND "
+	query := "SELECT app_id, name, meta, strategy, release_id, created_at, updated_at FROM apps WHERE deleted_at IS NULL AND "
 	var suffix string
 	if update {
 		suffix = " FOR UPDATE"
@@ -171,11 +181,19 @@ func (r *AppRepo) Update(id string, data map[string]interface{}) (interface{}, e
 		}
 	}
 
-	return app, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	defer r.createEvent(id, ct.AppEvent{
+		Type: "update",
+	})
+
+	return app, nil
 }
 
 func (r *AppRepo) List() (interface{}, error) {
-	rows, err := r.db.Query("SELECT app_id, name, meta, strategy, created_at, updated_at FROM apps WHERE deleted_at IS NULL ORDER BY created_at DESC")
+	rows, err := r.db.Query("SELECT app_id, name, meta, strategy, release_id, created_at, updated_at FROM apps WHERE deleted_at IS NULL ORDER BY created_at DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -192,12 +210,38 @@ func (r *AppRepo) List() (interface{}, error) {
 }
 
 func (r *AppRepo) SetRelease(appID string, releaseID string) error {
-	return r.db.Exec("UPDATE apps SET release_id = $2, updated_at = now() WHERE app_id = $1", appID, releaseID)
+	if err := r.db.Exec("UPDATE apps SET release_id = $2, updated_at = now() WHERE app_id = $1", appID, releaseID); err != nil {
+		return err
+	}
+	defer r.createEvent(appID, ct.AppEvent{
+		Type: "update",
+	})
+	return nil
 }
 
 func (r *AppRepo) GetRelease(id string) (*ct.Release, error) {
 	row := r.db.QueryRow("SELECT r.release_id, r.artifact_id, r.data, r.created_at FROM apps a JOIN releases r USING (release_id) WHERE a.app_id = $1", id)
 	return scanRelease(row)
+}
+
+func (r *AppRepo) createEvent(appID string, e ct.AppEvent) error {
+	app, err := selectApp(r.db, appID, false)
+	if err != nil {
+		fmt.Printf("AppRepo.createEvent error (selectApp): %#v\n", err)
+		return err
+	}
+	e.App = app
+	data, err := json.Marshal(e)
+	if err != nil {
+		fmt.Printf("AppRepo.createEvent error (json.Marshal): %#v\n", err)
+		return err
+	}
+	query := "INSERT INTO events (app_id, object_id, object_type, data) VALUES ($1, $2, $3, $4)"
+	if err := r.db.Exec(query, appID, appID, string(ct.EventTypeApp), data); err != nil {
+		fmt.Printf("AppRepo.createEvent error: %#v\n", err)
+		return err
+	}
+	return nil
 }
 
 func (c *controllerAPI) UpdateApp(ctx context.Context, rw http.ResponseWriter, req *http.Request) {

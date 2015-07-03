@@ -24,6 +24,7 @@ type App struct {
 	Name      string            `json:"name,omitempty"`
 	Meta      map[string]string `json:"meta,omitempty"`
 	Strategy  string            `json:"strategy,omitempty"`
+	ReleaseID string            `json:"release_id,omitempty"`
 	CreatedAt *time.Time        `json:"created_at,omitempty"`
 	UpdatedAt *time.Time        `json:"updated_at,omitempty"`
 }
@@ -196,6 +197,7 @@ type LogOpts struct {
 type EventType string
 
 const (
+	EventTypeApp         EventType = "app"
 	EventTypeAppDeletion EventType = "app_deletion"
 	EventTypeDeployment  EventType = "deployment"
 	EventTypeJob         EventType = "job"
@@ -220,4 +222,10 @@ type AppDeletion struct {
 type AppDeletionEvent struct {
 	AppDeletion *AppDeletion `json:"app_deletion"`
 	Error       string       `json:"error"`
+}
+
+type AppEvent struct {
+	Type  string `json:"type"`
+	App   *App   `json:"app,omitempty"`
+	Error error  `json:"error,omitempty"`
 }
